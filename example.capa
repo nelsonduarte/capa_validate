@@ -1,0 +1,38 @@
+// example.capa
+//
+// Validate a small "sign-up form" of untrusted fields, collecting every
+// structural failure at once. The library itself is pure (no
+// capabilities at all); the only capability here is the example's own
+// Stdio, used to print. The validators never touch it.
+//
+// Run from the repository root:
+//
+//     capa --run example.capa
+//     capa --wasm --run example.capa   # byte-identical output
+
+import capa_validate.validate
+
+fun main(stdio: Stdio)
+    // Pretend these arrived from an untrusted request.
+    let username = "ab"                 // too short (min 3)
+    let email = "not-an-email"          // no '@'
+    let age = "200"                     // out of range
+    let country = "ZZ"                  // not a known code
+
+    let form = new_form()
+    check_field(form, "username", length_between(username, 3, 20))
+    check_field(form, "email", looks_like_email(email))
+    check_field(form, "age", parse_int_in_range(age, 0, 130))
+    check_field(form, "country", one_of(country, ["US", "PT", "GB"]))
+
+    if form.is_valid()
+        stdio.println("all fields valid")
+    else
+        stdio.println("${form.error_count()} field(s) failed validation:")
+        for line in form.messages()
+            stdio.println("  - ${line}")
+
+    // A single field on its own, using the returned (trimmed) value.
+    match trimmed_non_empty("   hello   ")
+        Ok(v)  -> stdio.println("trimmed value: '${v}'")
+        Err(e) -> stdio.println("blank: ${error_message(e)}")

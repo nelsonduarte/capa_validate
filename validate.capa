@@ -1,0 +1,367 @@
+// capa_validate.validate
+//
+// Composable INPUT VALIDATION for untrusted strings and integers:
+// structural, shape-level checks that catch malformed input early.
+// Pure Capa with ZERO capabilities and ZERO runtime dependencies:
+// every function is a total transform over `String` / `Int` returning
+// a `Result<T, ValidationError>` (or a `Bool`), so nothing here can
+// touch the filesystem, the network, the clock, randomness, or anything
+// else. `capa --manifest` proves the empty surface. Output is
+// byte-identical on the Python and Wasm backends.
+//
+// HONEST POSTURE. These are STRUCTURAL checks, not security guarantees
+// and not authoritative parsers. `looks_like_email` and `looks_like_url`
+// are deliberately loose HEURISTICS over the shape of the text: passing
+// one means only "this could be an email / URL", never that the address
+// is real, deliverable, or safe, nor that the URL resolves or is
+// trustworthy. Use them to reject obvious garbage early, then hand the
+// value to a real parser / verification step downstream. See the README.
+//
+// i64 NOTE. `parse_int_in_range` delegates to the built-in `parse_int`,
+// which fails closed to `None` for any string outside the signed 64-bit
+// range [-2^63, 2^63), identically on both backends. So a numeric string
+// too large to fit an `Int` is rejected as `NotInteger` and is NEVER
+// converted to a trapping value (Capa's Wasm backend traps on i64
+// overflow while Python uses bignums; routing everything through
+// `parse_int` keeps the two backends in lock step).
+
+// The character classes the validators test against.
+const DIGITS: String = "0123456789"
+const ALNUM: String = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+// ASCII whitespace the email / URL heuristics reject.
+const WHITESPACE: String = " \t\n\r"
+
+/// Why a structural validation failed. Each variant names one distinct
+/// shape violation; `error_message` renders it. Every variant describes
+/// the INPUT's shape only. None is a security, authenticity, or
+/// deliverability claim (see the module header's HONEST POSTURE note).
+pub type ValidationError =
+    Empty                    // a value required to be non-empty was empty
+    TooShort(Int, Int)       // (length, minimum): length < minimum
+    TooLong(Int, Int)        // (length, maximum): length > maximum
+    NotAscii(Int)            // code-point index of the first non-ASCII character
+    NotDigits                // a character outside 0-9
+    NotAlphanumeric          // a character outside A-Za-z0-9
+    NotInSet(String)         // the value, which is not one of the options
+    DisallowedChar(String)   // a character outside the allowed charset
+    NotInteger               // not a base-10 integer within the i64 range
+    NotDecimal               // not a base-10 decimal number
+    OutOfRange(Int, Int)     // (lo, hi): the integer is outside [lo, hi]
+    NotEmail(String)         // the email shape heuristic failed (reason)
+    NotUrl(String)           // the URL shape heuristic failed (reason)
+
+/// A human-readable message for a `ValidationError`.
+pub fun error_message(e: ValidationError) -> String
+    return match e
+        Empty              -> "must not be empty"
+        TooShort(len, min) -> "too short: length ${len} is below the minimum ${min}"
+        TooLong(len, max)  -> "too long: length ${len} exceeds the maximum ${max}"
+        NotAscii(i)        -> "contains a non-ASCII character at index ${i}"
+        NotDigits          -> "must contain only digits 0-9"
+        NotAlphanumeric    -> "must contain only ASCII letters and digits"
+        NotInSet(v)        -> "'${v}' is not one of the allowed options"
+        DisallowedChar(c)  -> "contains a disallowed character '${c}'"
+        NotInteger         -> "must be a base-10 integer within the signed 64-bit range"
+        NotDecimal         -> "must be a base-10 decimal number"
+        OutOfRange(lo, hi) -> "must be in the range ${lo}..${hi}"
+        NotEmail(why)      -> "not a structurally valid email address: ${why}"
+        NotUrl(why)        -> "not a structurally valid URL: ${why}"
+
+// ---------------------------------------------------------------
+// Small String helpers. Inputs are validated character by character, so
+// a `char_at` read yields exactly one code point to test.
+
+/// The character at index `i`, or "" past the end.
+fun char_str(text: String, i: Int) -> String
+    return match text.char_at(i)
+        Some(ch) -> ch
+        None     -> ""
+
+/// The first character of `s` that is not present in `allowed`, or
+/// `None` if every character is allowed. The empty string yields `None`.
+fun first_not_in(s: String, allowed: String) -> Option<String>
+    let n = s.length()
+    var i = 0
+    while i < n
+        let c = char_str(s, i)
+        if not allowed.contains(c)
+            return Some(c)
+        i = i + 1
+    return None
+
+/// True if `s` contains at least one character from `chars`.
+fun contains_any(s: String, chars: String) -> Bool
+    let n = s.length()
+    var i = 0
+    while i < n
+        if chars.contains(char_str(s, i))
+            return true
+        i = i + 1
+    return false
+
+/// True if `s` contains any ASCII whitespace character.
+fun has_whitespace(s: String) -> Bool
+    return contains_any(s, WHITESPACE)
+
+/// The number of occurrences of the single-character `needle` in `s`.
+fun count_char(s: String, needle: String) -> Int
+    return s.split(needle).length() - 1
+
+/// The index of `needle` in `s`, or `dflt` when absent.
+fun index_or(s: String, needle: String, dflt: Int) -> Int
+    return match s.index_of(needle)
+        Some(i) -> i
+        None    -> dflt
+
+// ---------------------------------------------------------------
+// String shape validators. Each returns the validated value in `Ok` so
+// checks compose with `?` and read left to right.
+
+/// Require a non-empty string.
+pub fun non_empty(s: String) -> Result<String, ValidationError>
+    if s.is_empty()
+        return Err(Empty)
+    return Ok(s)
+
+/// Trim surrounding whitespace, then require the result to be non-empty.
+/// Returns the TRIMMED value on success, so a form field of only spaces
+/// counts as blank.
+pub fun trimmed_non_empty(s: String) -> Result<String, ValidationError>
+    let t = s.trim()
+    if t.is_empty()
+        return Err(Empty)
+    return Ok(t)
+
+/// Require `min <= length <= max` (bounds inclusive), counting Unicode
+/// code points (as `String.length()` does, not bytes).
+pub fun length_between(s: String, min: Int, max: Int) -> Result<String, ValidationError>
+    let n = s.length()
+    if n < min
+        return Err(TooShort(n, min))
+    if n > max
+        return Err(TooLong(n, max))
+    return Ok(s)
+
+/// Require every character to be ASCII (code point < 128). The empty
+/// string passes. Reports the index of the first non-ASCII character.
+pub fun is_ascii(s: String) -> Result<String, ValidationError>
+    let n = s.length()
+    var i = 0
+    while i < n
+        let bs = char_str(s, i).bytes()
+        if bs.length() != 1 or bs[0] > 0x7F
+            return Err(NotAscii(i))
+        i = i + 1
+    return Ok(s)
+
+/// Require a non-empty string of only ASCII digits 0-9. (This is a shape
+/// check, not a parse: a long run of digits may exceed the i64 range;
+/// use `parse_int_in_range` to turn digits into a bounded `Int`.)
+pub fun is_digits(s: String) -> Result<String, ValidationError>
+    if s.is_empty()
+        return Err(Empty)
+    return match first_not_in(s, DIGITS)
+        Some(_) -> Err(NotDigits)
+        None    -> Ok(s)
+
+/// Require a non-empty string of only ASCII letters and digits.
+pub fun is_alphanumeric(s: String) -> Result<String, ValidationError>
+    if s.is_empty()
+        return Err(Empty)
+    return match first_not_in(s, ALNUM)
+        Some(_) -> Err(NotAlphanumeric)
+        None    -> Ok(s)
+
+/// Require every character of `s` to belong to `allowed`. The empty
+/// string passes (it has no disallowed character). Reports the first
+/// offending character.
+pub fun matches_charset(s: String, allowed: String) -> Result<String, ValidationError>
+    return match first_not_in(s, allowed)
+        Some(c) -> Err(DisallowedChar(c))
+        None    -> Ok(s)
+
+/// Require `s` to be exactly equal to one of `options` (a whitelist /
+/// enum check). Comparison is exact, case-sensitive.
+pub fun one_of(s: String, options: List<String>) -> Result<String, ValidationError>
+    if options.contains(s)
+        return Ok(s)
+    return Err(NotInSet(s))
+
+// ---------------------------------------------------------------
+// Numeric validators.
+
+/// Require the integer `n` to satisfy `lo <= n <= hi` (bounds inclusive).
+pub fun int_in_range(n: Int, lo: Int, hi: Int) -> Result<Int, ValidationError>
+    if n < lo or n > hi
+        return Err(OutOfRange(lo, hi))
+    return Ok(n)
+
+/// Parse `s` as a base-10 integer AND require it to fall in `[lo, hi]`.
+/// Returns the parsed `Int` on success.
+///
+/// Delegates parsing to the built-in `parse_int` (surrounding ASCII
+/// whitespace and an optional sign are accepted; no separators or
+/// `0x`/`0b`/`0o` bases). A string that is not a base-10 integer, OR one
+/// whose magnitude falls outside the signed 64-bit range [-2^63, 2^63),
+/// is rejected as `NotInteger`, identically on both backends: it is
+/// never converted to a value that would trap the Wasm backend (see the
+/// module header's i64 NOTE). A value that parses but lies outside
+/// `[lo, hi]` is `OutOfRange(lo, hi)`.
+pub fun parse_int_in_range(s: String, lo: Int, hi: Int) -> Result<Int, ValidationError>
+    return match parse_int(s)
+        None    -> Err(NotInteger)
+        Some(n) -> int_in_range(n, lo, hi)
+
+/// True if `s` is a SYNTACTIC base-10 integer: an optional leading `+`
+/// or `-`, then one or more ASCII digits, with no whitespace and nothing
+/// else. This is a shape check only: a syntactically valid integer may
+/// still exceed the i64 range, so it does NOT guarantee `parse_int` /
+/// `parse_int_in_range` will accept it. Use those to actually parse.
+pub fun is_integer_string(s: String) -> Bool
+    let n = s.length()
+    if n == 0
+        return false
+    var i = 0
+    let first = char_str(s, 0)
+    if first == "+" or first == "-"
+        i = 1
+    if i >= n
+        return false
+    while i < n
+        if not DIGITS.contains(char_str(s, i))
+            return false
+        i = i + 1
+    return true
+
+/// True if `s` is a SYNTACTIC base-10 decimal number: an optional
+/// leading `+` or `-`, then digits with at most one `.`, requiring at
+/// least one digit overall. So `"42"`, `"3.14"`, `".5"`, and `"5."` all
+/// pass; `""`, `"."`, `"+"`, `"1.2.3"`, `"1e3"`, and `"0x1F"` do not.
+/// A shape check only, with no scientific notation and no i64/precision
+/// guarantee.
+pub fun is_decimal_string(s: String) -> Bool
+    var body = s
+    let first = char_str(s, 0)
+    if first == "+" or first == "-"
+        body = s.substring(1, s.length())
+    if body.is_empty()
+        return false
+    if count_char(body, ".") > 1
+        return false
+    let digits_only = body.replace(".", "")
+    if digits_only.is_empty()
+        return false
+    return first_not_in(digits_only, DIGITS).is_none()
+
+// ---------------------------------------------------------------
+// Heuristic structural checks. NON-AUTHORITATIVE by design: see the
+// module header's HONEST POSTURE note and the README before relying on
+// either for anything beyond rejecting obvious garbage early.
+
+/// STRUCTURAL heuristic that `s` has the shape of an email address:
+/// no whitespace, exactly one `@`, a non-empty local part, and a domain
+/// that is non-empty, contains a `.`, and neither starts nor ends with a
+/// `.`. This is NOT RFC 5322, does NOT prove the address exists or is
+/// deliverable, and accepts many strings a real mail system would
+/// reject. Returns the input unchanged on a pass.
+pub fun looks_like_email(s: String) -> Result<String, ValidationError>
+    if has_whitespace(s)
+        return Err(NotEmail("contains whitespace"))
+    if count_char(s, "@") != 1
+        return Err(NotEmail("must contain exactly one '@'"))
+    let at = index_or(s, "@", 0)
+    let local = s.substring(0, at)
+    let domain = s.substring(at + 1, s.length())
+    if local.is_empty()
+        return Err(NotEmail("empty local part"))
+    if domain.is_empty()
+        return Err(NotEmail("empty domain"))
+    if not domain.contains(".")
+        return Err(NotEmail("domain has no '.'"))
+    if domain.starts_with(".") or domain.ends_with(".")
+        return Err(NotEmail("domain '.' at an edge"))
+    return Ok(s)
+
+/// STRUCTURAL heuristic that `s` has the shape of an http/https URL:
+/// no whitespace, an `http://` or `https://` scheme (case-insensitive),
+/// and a non-empty host before any `/`, `?`, or `#`. This does NOT prove
+/// the URL is well-formed per RFC 3986, that the host resolves, or that
+/// the URL is safe to fetch. Returns the input unchanged on a pass.
+pub fun looks_like_url(s: String) -> Result<String, ValidationError>
+    if has_whitespace(s)
+        return Err(NotUrl("contains whitespace"))
+    let lower = s.to_lower()
+    var rest = ""
+    if lower.starts_with("https://")
+        rest = s.substring(8, s.length())
+    elif lower.starts_with("http://")
+        rest = s.substring(7, s.length())
+    else
+        return Err(NotUrl("missing http:// or https:// scheme"))
+    if host_part(rest).is_empty()
+        return Err(NotUrl("empty host"))
+    return Ok(s)
+
+/// The authority host: the prefix of `rest` up to the first `/`, `?`, or
+/// `#`, or all of `rest` when none is present.
+fun host_part(rest: String) -> String
+    let n = rest.length()
+    var end = index_or(rest, "/", n)
+    let ques = index_or(rest, "?", n)
+    let hash = index_or(rest, "#", n)
+    if ques < end
+        end = ques
+    if hash < end
+        end = hash
+    return rest.substring(0, end)
+
+// ---------------------------------------------------------------
+// Form-style validation: collect the failures of several named fields.
+
+/// One field's failure: the field name plus the structural reason.
+pub type FieldError {
+    field: String,
+    error: ValidationError
+}
+
+/// A human-readable "<field>: <message>" for a `FieldError`.
+pub fun field_error_message(fe: FieldError) -> String
+    return "${fe.field}: ${error_message(fe.error)}"
+
+/// Accumulates the field errors of a multi-field validation. Reference
+/// semantics: pass it to `check_field` freely, the collected errors are
+/// shared. Start from `new_form()`.
+pub type Form {
+    errors: List<FieldError>
+}
+
+/// A fresh form with no errors yet.
+pub fun new_form() -> Form
+    let errs: List<FieldError> = []
+    return Form { errors: errs }
+
+/// Validate one named field, recording any failure in `form`. Pass the
+/// `Result` straight from any validator; on `Err` it appends a
+/// `FieldError`, on `Ok` it does nothing. Generic over the validated
+/// type, so `String`- and `Int`-returning validators mix in one form.
+pub fun check_field<T>(form: Form, name: String, result: Result<T, ValidationError>)
+    match result.err()
+        Some(e) -> form.errors.push(FieldError { field: name, error: e })
+        None    -> ()
+
+impl Form
+    /// True when no field has failed.
+    pub fun is_valid(self) -> Bool
+        return self.errors.is_empty()
+
+    /// The number of failed fields.
+    pub fun error_count(self) -> Int
+        return self.errors.length()
+
+    /// One "<field>: <message>" line per failure, in the order the
+    /// fields were checked.
+    pub fun messages(self) -> List<String>
+        let out: List<String> = []
+        for fe in self.errors
+            out.push(field_error_message(fe))
+        return out

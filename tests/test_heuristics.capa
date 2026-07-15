@@ -1,0 +1,55 @@
+// tests/test_heuristics.capa
+//
+// The NON-AUTHORITATIVE email / URL shape heuristics, against the exact
+// adversarial inputs the README documents. These pin what the heuristic
+// does and does NOT catch: it rejects obvious garbage (empty local part,
+// no dot, multiple '@', spaces, missing scheme) and accepts anything of
+// the right shape, WITHOUT claiming the address or URL is real, safe, or
+// deliverable. The checks are checked here for their documented behaviour,
+// not as a correctness proof of address validity.
+
+import capa_test.testing
+import capa_validate.validate
+import support
+
+fun main(stdio: Stdio)
+    let t = tester()
+
+    // --- looks_like_email: accepted shapes. ---
+    t.eq_str(stdio, "email_ok", str_res(looks_like_email("user@example.com")), "Ok(user@example.com)")
+    t.eq_str(stdio, "email_ok_plus", str_res(looks_like_email("a.b+tag@sub.example.co")), "Ok(a.b+tag@sub.example.co)")
+
+    // --- looks_like_email: adversarial / malformed. Whitespace is
+    // checked first, so a spaced address reports whitespace. ---
+    t.eq_str(stdio, "email_empty", str_res(looks_like_email("")), "NotEmail(must contain exactly one '@')")
+    t.eq_str(stdio, "email_no_at", str_res(looks_like_email("userexample.com")), "NotEmail(must contain exactly one '@')")
+    t.eq_str(stdio, "email_two_at", str_res(looks_like_email("user@@example.com")), "NotEmail(must contain exactly one '@')")
+    t.eq_str(stdio, "email_split_at", str_res(looks_like_email("a@b@example.com")), "NotEmail(must contain exactly one '@')")
+    t.eq_str(stdio, "email_space", str_res(looks_like_email("user @example.com")), "NotEmail(contains whitespace)")
+    t.eq_str(stdio, "email_lead_space", str_res(looks_like_email("  user@example.com")), "NotEmail(contains whitespace)")
+    t.eq_str(stdio, "email_empty_local", str_res(looks_like_email("@example.com")), "NotEmail(empty local part)")
+    t.eq_str(stdio, "email_empty_domain", str_res(looks_like_email("user@")), "NotEmail(empty domain)")
+    t.eq_str(stdio, "email_no_dot", str_res(looks_like_email("user@localhost")), "NotEmail(domain has no '.')")
+    t.eq_str(stdio, "email_dot_lead", str_res(looks_like_email("user@.com")), "NotEmail(domain '.' at an edge)")
+    t.eq_str(stdio, "email_dot_trail", str_res(looks_like_email("user@example.")), "NotEmail(domain '.' at an edge)")
+    // DOCUMENTED heuristic limit: a nonsense address of the right shape
+    // is ACCEPTED. This is not a real address; the heuristic cannot tell.
+    t.eq_str(stdio, "email_accepts_nonsense", str_res(looks_like_email("....@x.y")), "Ok(....@x.y)")
+
+    // --- looks_like_url: accepted shapes. ---
+    t.eq_str(stdio, "url_http", str_res(looks_like_url("http://example.com")), "Ok(http://example.com)")
+    t.eq_str(stdio, "url_https_full", str_res(looks_like_url("https://example.com/path?q=1#frag")), "Ok(https://example.com/path?q=1#frag)")
+    // Scheme is case-insensitive.
+    t.eq_str(stdio, "url_upper_scheme", str_res(looks_like_url("HTTP://Example.COM")), "Ok(HTTP://Example.COM)")
+    // Userinfo stays part of the authority; host is non-empty.
+    t.eq_str(stdio, "url_userinfo", str_res(looks_like_url("https://user@host.com/p")), "Ok(https://user@host.com/p)")
+
+    // --- looks_like_url: adversarial / malformed. ---
+    t.eq_str(stdio, "url_no_scheme", str_res(looks_like_url("example.com")), "NotUrl(missing http:// or https:// scheme)")
+    t.eq_str(stdio, "url_ftp", str_res(looks_like_url("ftp://example.com")), "NotUrl(missing http:// or https:// scheme)")
+    t.eq_str(stdio, "url_empty_host", str_res(looks_like_url("http://")), "NotUrl(empty host)")
+    t.eq_str(stdio, "url_slash_host", str_res(looks_like_url("https:///path")), "NotUrl(empty host)")
+    t.eq_str(stdio, "url_space", str_res(looks_like_url("http://exa mple.com")), "NotUrl(contains whitespace)")
+    t.eq_str(stdio, "url_lead_space", str_res(looks_like_url("  http://example.com")), "NotUrl(contains whitespace)")
+
+    t.finish(stdio)

@@ -1,0 +1,40 @@
+// tests/test_form.capa
+//
+// Form-style validation: check several named fields, collecting every
+// failure (not just the first) so a caller can report all of them at
+// once. check_field is generic, so String- and Int-returning validators
+// mix in one form.
+
+import capa_test.testing
+import capa_validate.validate
+import support
+
+fun main(stdio: Stdio)
+    let t = tester()
+
+    // --- A form with three failing fields and one passing field. ---
+    let form = new_form()
+    check_field(form, "name", non_empty(""))
+    check_field(form, "email", looks_like_email("bad"))
+    check_field(form, "age", parse_int_in_range("200", 0, 130))
+    check_field(form, "nick", non_empty("fine"))   // Ok: records nothing
+
+    t.eq_bool(stdio, "form_invalid", form.is_valid(), false)
+    t.eq_int(stdio, "form_count", form.error_count(), 3)
+
+    let msgs = form.messages()
+    t.eq_int(stdio, "msgs_len", msgs.length(), 3)
+    t.eq_str(stdio, "msg_name", msgs[0], "name: must not be empty")
+    t.eq_str(stdio, "msg_email", msgs[1], "email: not a structurally valid email address: must contain exactly one '@'")
+    t.eq_str(stdio, "msg_age", msgs[2], "age: must be in the range 0..130")
+
+    // --- A fully valid form collects nothing. ---
+    let good = new_form()
+    check_field(good, "name", non_empty("Ada"))
+    check_field(good, "email", looks_like_email("ada@example.com"))
+    check_field(good, "age", parse_int_in_range("36", 0, 130))
+    t.eq_bool(stdio, "good_valid", good.is_valid(), true)
+    t.eq_int(stdio, "good_count", good.error_count(), 0)
+    t.eq_int(stdio, "good_msgs", good.messages().length(), 0)
+
+    t.finish(stdio)

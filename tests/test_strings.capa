@@ -1,0 +1,67 @@
+// tests/test_strings.capa
+//
+// String shape validators: non_empty, trimmed_non_empty, length_between
+// (boundary lengths), is_ascii (unicode vs ascii, first-offender index),
+// is_digits, is_alphanumeric, matches_charset, and one_of. Each with a
+// passing case and the specific failure it should report.
+
+import capa_test.testing
+import capa_validate.validate
+import support
+
+fun main(stdio: Stdio)
+    let t = tester()
+
+    // --- non_empty / trimmed_non_empty ---
+    t.eq_str(stdio, "non_empty_ok", str_res(non_empty("x")), "Ok(x)")
+    t.eq_str(stdio, "non_empty_empty", str_res(non_empty("")), "Empty")
+    // A whitespace-only string is non-empty as-is, but blank once trimmed.
+    t.eq_str(stdio, "non_empty_spaces", str_res(non_empty("   ")), "Ok(   )")
+    t.eq_str(stdio, "trimmed_ok", str_res(trimmed_non_empty("  hi  ")), "Ok(hi)")
+    t.eq_str(stdio, "trimmed_blank", str_res(trimmed_non_empty("   ")), "Empty")
+
+    // --- length_between: inclusive bounds, so test exactly at min/max
+    // and one past each edge. ---
+    t.eq_str(stdio, "len_at_min", str_res(length_between("ab", 2, 4)), "Ok(ab)")
+    t.eq_str(stdio, "len_at_max", str_res(length_between("abcd", 2, 4)), "Ok(abcd)")
+    t.eq_str(stdio, "len_below", str_res(length_between("a", 2, 4)), "TooShort(1,2)")
+    t.eq_str(stdio, "len_above", str_res(length_between("abcde", 2, 4)), "TooLong(5,4)")
+    // length counts code points, not bytes: "café" is 4 code points.
+    t.eq_str(stdio, "len_codepoints", str_res(length_between("café", 4, 4)), "Ok(café)")
+
+    // --- is_ascii: pure ASCII passes; the first non-ASCII code point is
+    // reported by index (code-point index, not byte). ---
+    t.eq_str(stdio, "ascii_ok", str_res(is_ascii("hello123!")), "Ok(hello123!)")
+    t.eq_str(stdio, "ascii_empty", str_res(is_ascii("")), "Ok()")
+    // "abcaé": the 'é' sits at code-point index 4.
+    t.eq_str(stdio, "ascii_first_offender", str_res(is_ascii("abcaé")), "NotAscii(4)")
+    // A leading multi-byte character is index 0.
+    t.eq_str(stdio, "ascii_lead_unicode", str_res(is_ascii("日本")), "NotAscii(0)")
+
+    // --- is_digits ---
+    t.eq_str(stdio, "digits_ok", str_res(is_digits("0123456789")), "Ok(0123456789)")
+    t.eq_str(stdio, "digits_empty", str_res(is_digits("")), "Empty")
+    t.eq_str(stdio, "digits_sign", str_res(is_digits("-1")), "NotDigits")
+    t.eq_str(stdio, "digits_space", str_res(is_digits("1 2")), "NotDigits")
+    t.eq_str(stdio, "digits_unicode", str_res(is_digits("１２３")), "NotDigits")
+
+    // --- is_alphanumeric ---
+    t.eq_str(stdio, "alnum_ok", str_res(is_alphanumeric("abcXYZ09")), "Ok(abcXYZ09)")
+    t.eq_str(stdio, "alnum_empty", str_res(is_alphanumeric("")), "Empty")
+    t.eq_str(stdio, "alnum_punct", str_res(is_alphanumeric("ab_cd")), "NotAlphanumeric")
+    t.eq_str(stdio, "alnum_accent", str_res(is_alphanumeric("café")), "NotAlphanumeric")
+
+    // --- matches_charset: caller-supplied allowed set; empty string
+    // passes vacuously; the first offender is reported. ---
+    let hexset = "0123456789abcdef"
+    t.eq_str(stdio, "charset_ok", str_res(matches_charset("deadbeef", hexset)), "Ok(deadbeef)")
+    t.eq_str(stdio, "charset_empty", str_res(matches_charset("", hexset)), "Ok()")
+    t.eq_str(stdio, "charset_bad", str_res(matches_charset("deadbeX", hexset)), "DisallowedChar(X)")
+
+    // --- one_of: exact, case-sensitive whitelist. ---
+    let colors = ["red", "green", "blue"]
+    t.eq_str(stdio, "one_of_ok", str_res(one_of("green", colors)), "Ok(green)")
+    t.eq_str(stdio, "one_of_case", str_res(one_of("Green", colors)), "NotInSet(Green)")
+    t.eq_str(stdio, "one_of_absent", str_res(one_of("purple", colors)), "NotInSet(purple)")
+
+    t.finish(stdio)
