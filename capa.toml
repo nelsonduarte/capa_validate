@@ -14,8 +14,119 @@
 
 [package]
 name = "capa_validate"
-version = "0.1.0"
-capa = ">=1.1.0"
+
+# NO CONSUMER PINS THIS PACKAGE, checked rather than assumed. Of the 42
+# repositories on this machine, none names capa_validate in a capa.toml
+# or a capa.lock, and no workflow names it as a consumer of anything.
+# The only mention of it anywhere outside this tree is its own listing
+# in the registry index. So the bump and the floor below disturb nothing
+# downstream, and there is no consumer lockfile to reason about.
+version = "0.2.0"
+
+# THE COMPILER FLOOR, MEASURED HERE against released binaries in a
+# directory with no siblings, rather than inherited from a sibling
+# repository. It declared `>=1.1.0`, which was not merely untested but
+# FALSE: that release cannot build this package.
+#
+#   1.1.0, 1.16.0, 1.17.0   `capa --check example.capa` exits 1 with
+#                           "cannot resolve 'import
+#                           capa_validate.validate'", having tried
+#                           capa_validate/validate.capa and
+#                           vendor/capa_validate/validate.capa under the
+#                           extracted root capa_validate-v<tag>. PR #85
+#                           (capa 1.18.0) made `[package].name` map to
+#                           the project root; below it a package that
+#                           imports itself by name resolves to nothing.
+#   1.18.0                  Both `capa --check` calls pass, and
+#                           `capa test` then reports "4 test(s):
+#                           0 passed, 4 failed" with "unrecognized
+#                           arguments: -m". Under PyInstaller the runner
+#                           spawned `sys.executable -m capa`, and a
+#                           frozen binary is not a Python interpreter.
+#   1.18.1                  The whole flow passes: both checks ok, and
+#                           "4 test(s): 4 passed, 0 failed".
+#
+# So >=1.18.1, the oldest compiler that completes the flow the README
+# documents. Narrowing the toolchain is a real change, hence the minor
+# bump; no API changed.
+#
+# WHAT CARRIES IT, PRECISELY, AND IT IS TWO THINGS HERE. Both the
+# example and the test suite self-import, and each fails below 1.18.0 on
+# its own:
+#
+#   * example.capa, via `import capa_validate.validate`, measured above.
+#   * tests/, all five modules, via the same import. That was measured
+#     DIRECTLY (`capa --check tests/support.capa` and
+#     `capa --check tests/test_strings.capa` on 1.16.0, both exit 1 on
+#     the same unresolved import; both "ok" on 1.18.1) and not read off
+#     `capa test`, because under `capa test` the self-import failure is
+#     MASKED below 1.18.1: the runner dies on the `-m` defect before any
+#     module is resolved, and reports "0 passed, 4 failed" for a reason
+#     that has nothing to do with imports. Reading `capa test` as the
+#     witness would have been reading the wrong error.
+#
+# It is NOT carried by the library head. `capa --check validate.capa`
+# reports "ok (32 items, 441 expressions typed, 259 bindings)" on 1.1.0,
+# 1.16.0, 1.17.0, 1.18.0 and 1.18.1, byte-identical, because
+# validate.capa imports nothing. A repository whose release checked only
+# the library module would have seen no floor at all.
+capa = ">=1.18.1"
+
+# THE CEILING. `max` bounds every capability reachable from a checked
+# entry point, and it is what a consumer inherits as a machine-checked
+# bound rather than as a paragraph of README. Measured on the released
+# 1.18.1 against a tarball of this tree, by reading output rather than
+# exit codes alone.
+#
+#   * A `pub fun load_rules_file(fs: Fs, path: String) -> Result<String,
+#     IoError>` added to validate.capa is ACCEPTED by `capa --check`:
+#     "ok (33 items, 447 expressions typed, 263 bindings)" against
+#     "ok (32 items, 441 expressions typed, 259 bindings)" without it. A
+#     pure text-and-integer validator would silently acquire the
+#     authority to read the filesystem, and it would ship. This table is
+#     the only thing that refuses it: "package 'capa_validate' declares
+#     max=['Stdio'] but its own code introduces 'Fs'".
+#
+#   * THE CLOSURE BOUNDARY WAS PLANTED, NOT REASONED ABOUT, and it is
+#     ONE-WAY here. `--check-capabilities` covers the import closure of
+#     the entry it is given, and example.capa imports validate.capa
+#     while nothing imports example.capa. Measured:
+#
+#       defect in validate.capa -> validate.capa exit 1
+#                                  example.capa  exit 1
+#       defect in example.capa  -> validate.capa exit 0, "OK - every
+#                                    declared capability ceiling holds"
+#                                  example.capa  exit 1
+#
+#     So example.capa COVERS validate.capa and validate.capa does not
+#     cover example.capa. Both are still ceiling entries in the release
+#     flow: the example is the only entry that catches a defect in
+#     itself, and checking the library in ISOLATION is the claim a
+#     consumer actually inherits, since a consumer imports validate.capa
+#     and never example.capa. That isolated check is weaker than it
+#     looks under this ceiling, and the next bullet says how.
+#
+#   * WHY "Stdio" AND NOT THE NARROWER `max = []`. Measured: with
+#     `max = []`, validate.capa still passes ("OK"), and example.capa is
+#     refused with "declares max=[] but its own code introduces
+#     'Stdio'". The README tells readers to run `capa --run example.capa`,
+#     so an empty ceiling would either ship a package whose documented
+#     command fails its own release check or drop the example from the
+#     checks entirely. That measurement also pins where the Stdio comes
+#     from: example.capa alone, never the library. The cost is exactly
+#     one hole, stated rather than hidden: this bound does not catch
+#     validate.capa acquiring Stdio. `capa --manifest validate.capa`
+#     remains the tighter statement and reports the empty set per
+#     function.
+#
+#   * DECLARING NO CEILING AT ALL, which is what v0.1.0 ships, was
+#     measured last and is the reason this table exists: on both modules
+#     `capa --check-capabilities` prints "no package declares a
+#     [capabilities] ceiling; nothing to verify" and exits 0. A release
+#     step that always passes having inspected nothing is worse than an
+#     absent one, because the log reads like evidence.
+[capabilities]
+max = ["Stdio"]
 
 [dev-dependencies.capa_test]
 git = "https://github.com/nelsonduarte/capa_test"
