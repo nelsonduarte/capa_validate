@@ -4,7 +4,7 @@ Pure-Capa **input validation**: composable, structural (shape-level)
 checks over untrusted strings and integers. Zero capabilities: every
 validator is a `(String) -> Result<...>` or `(Int) -> Result<...>`
 function. The library's functions declare no capability, and the compiler
-refuses any capability call in them; it reads no global state.
+refuses a call in them on a built-in capability that is not in scope; it reads no global state.
 `capa --manifest` records it (see [Audit claim](#audit-claim)). Output is byte-identical on the Python and
 Wasm backends.
 
